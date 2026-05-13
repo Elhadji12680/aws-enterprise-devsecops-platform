@@ -1,0 +1,62 @@
+name: Build, Scan & Push
+
+# Pipeline is DISABLED for auto-triggers — run manually only.
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag (e.g. v1.0.0)"
+        required: true
+        default: "latest"
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: jupiter-app
+
+jobs:
+  build-scan-push:
+    name: Build → Trivy Scan → Push to ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: |
+          docker build -t $ECR_REPOSITORY:${{ github.event.inputs.image_tag }} ./app
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
+          format: sarif
+          output: trivy-image-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image-results.sarif
+
+      - name: Push image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker tag $ECR_REPOSITORY:${{ github.event.inputs.image_tag }} \
+            $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.event.inputs.image_tag }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.event.inputs.image_tag }}
+          echo "Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.event.inputs.image_tag }}"
