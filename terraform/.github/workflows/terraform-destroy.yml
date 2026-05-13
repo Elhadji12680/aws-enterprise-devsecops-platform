@@ -1,0 +1,85 @@
+name: 🚨 DANGEROUS – Terraform Destroy (Dev – Main Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: "Type DESTROY to confirm"
+        required: true
+        default: ""
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: development-destroy
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # 1️⃣ Hard stop if not main branch
+      - name: Abort if not on main branch
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Terraform destroy can ONLY be run from the main branch."
+            exit 1
+          fi
+
+      # 2️⃣ Abort if not explicitly confirmed
+      - name: Abort if not confirmed
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "DESTROY" ]; then
+            echo "Destroy not confirmed. Type DESTROY exactly to proceed."
+            exit 1
+          fi
+
+      # 3️⃣ Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 4️⃣ Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # 5️⃣ Setup Terraform — pinned to >=1.10 for S3 native state locking (use_lockfile)
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      # 6️⃣ Terraform Init
+      - name: Terraform Init
+        run: terraform init
+
+      # 7️⃣ Select Terraform Workspace (dev)
+      - name: Select Terraform Workspace (dev)
+        run: terraform workspace select -or-create dev
+
+      # 8️⃣ Step 1 of 2 — Destroy Kubernetes workloads first (while EKS is still running)
+      # ArgoCD, Trivy, SonarQube, and Monitoring must be removed before EKS is torn down
+      - name: Terraform Destroy — Kubernetes Workloads
+        run: |
+          terraform destroy \
+            -target=module.argocd \
+            -target=module.trivy \
+            -target=module.sonarqube \
+            -target=module.monitoring \
+            -var-file=dev.tfvars \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -auto-approve \
+            -input=false
+
+      # 9️⃣ Step 2 of 2 — Destroy remaining infrastructure (EKS, EC2, RDS, VPC, etc.)
+      # Note: the S3 state bucket (bootstrap/) has prevent_destroy=true and is NOT destroyed here
+      - name: Terraform Destroy — Full Infrastructure
+        run: |
+          terraform destroy \
+            -var-file=dev.tfvars \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -auto-approve \
+            -input=false

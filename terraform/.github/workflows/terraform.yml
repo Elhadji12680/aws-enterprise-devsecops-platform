@@ -1,0 +1,113 @@
+name: Terraform AWS Deploy (Dev) – PR-First, No Direct Main Push
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write  # required to upload SARIF results to GitHub Security tab
+
+jobs:
+  terraform:
+    name: Terraform (Dev)
+    runs-on: ubuntu-latest
+    environment: development
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # 1️⃣ Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2️⃣ Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # 3️⃣ Setup Terraform — pinned to >=1.10 for S3 native state locking (use_lockfile)
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.10"
+
+      # 4️⃣ Terraform Init
+      - name: Terraform Init
+        run: terraform init
+
+      # 5️⃣ Select Terraform Workspace (dev)
+      - name: Select Terraform Workspace (dev)
+        run: terraform workspace select -or-create dev
+
+      # 6️⃣ Terraform Format Check
+      - name: Terraform Format
+        run: terraform fmt -check -recursive
+
+      # 7️⃣ Terraform Validate
+      - name: Terraform Validate
+        run: terraform validate
+
+      # 8️⃣ Trivy IaC Scan — scans all Terraform files for misconfigurations
+      - name: Trivy IaC Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-iac-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 0  # set to 1 to block PRs on findings
+
+      - name: Upload Trivy IaC SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-iac-results.sarif
+          category: trivy-iac
+
+      # 9️⃣ SonarQube Scan — static code analysis
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # 🔟 Terraform Plan (PR only)
+      - name: Terraform Plan (PR Only)
+        if: github.event_name == 'pull_request'
+        run: |
+          terraform plan \
+            -var-file=dev.tfvars \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -input=false
+
+      # 1️⃣1️⃣ Step 1 of 2 — Apply EKS first (kubernetes + helm providers need the cluster to exist)
+      - name: Terraform Apply — EKS (Main Only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          terraform apply \
+            -target=module.eks \
+            -var-file=dev.tfvars \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -auto-approve \
+            -input=false
+
+      # 1️⃣2️⃣ Step 2 of 2 — Apply full stack (ArgoCD, Trivy, SonarQube, Monitoring, IAM, etc.)
+      - name: Terraform Apply — Full Stack (Main Only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          terraform apply \
+            -var-file=dev.tfvars \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -auto-approve \
+            -input=false
