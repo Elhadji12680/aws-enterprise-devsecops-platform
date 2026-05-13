@@ -66,7 +66,7 @@ resource "kubernetes_manifest" "jupiter_app" {
       source = {
         repoURL        = var.argocd_git_repo_url
         targetRevision = var.argocd_git_repo_branch
-        path           = "k8s/jupiter"
+        path           = "k8s"
       }
       destination = {
         server    = "https://kubernetes.default.svc"
